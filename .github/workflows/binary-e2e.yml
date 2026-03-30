@@ -1,0 +1,184 @@
+name: Binary E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "package.json"
+      - "go.mod"
+      - "go.sum"
+      - ".goreleaser.yml"
+      - "scripts/**"
+      - ".github/workflows/binary-e2e.yml"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION_FILE: go.mod
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.x"
+
+jobs:
+  build-archives:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Fetch meta data
+        run: python3 scripts/fetch_meta.py
+
+      - name: Build release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}"
+          stage_dir="dist/stage/${{ matrix.goos }}-${{ matrix.goarch }}"
+          archive_dir="dist/archives"
+          binary_name="lark-cli"
+          archive_ext="tar.gz"
+
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            binary_name="lark-cli.exe"
+            archive_ext="zip"
+          fi
+
+          mkdir -p "$stage_dir" "$archive_dir"
+
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 \
+            go build -trimpath \
+              -ldflags "-s -w -X github.com/larksuite/cli/internal/build.Version=${version} -X github.com/larksuite/cli/internal/build.Date=$(date +%Y-%m-%d)" \
+              -o "${stage_dir}/${binary_name}" .
+
+          cp README.md LICENSE CHANGELOG.md "$stage_dir"/
+
+          archive_path="${archive_dir}/lark-cli-${{ matrix.goos }}-${{ matrix.goarch }}.${archive_ext}"
+          rm -f "$archive_path"
+
+          if [[ "$archive_ext" == "zip" ]]; then
+            (
+              cd "$stage_dir"
+              zip -q -r "../../archives/$(basename "$archive_path")" .
+            )
+          else
+            tar -czf "$archive_path" -C "$stage_dir" .
+          fi
+
+          echo "ARCHIVE_PATH=$archive_path" >> "$GITHUB_ENV"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.ARCHIVE_PATH }}
+          if-no-files-found: error
+
+  smoke-install-and-e2e:
+    name: Binary E2E ${{ matrix.runner }}
+    needs: build-archives
+    if: ${{ secrets.LARK_CLI_CI_APP_ID != '' && secrets.LARK_CLI_CI_APP_SECRET != '' }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+          - runner: macos-latest
+            goos: darwin
+          - runner: windows-latest
+            goos: windows
+    env:
+      # This workflow only verifies binary-level bot connectivity, so app
+      # credentials are enough. The Node runner script handles config defaults.
+      LARK_CLI_CI_APP_ID: ${{ secrets.LARK_CLI_CI_APP_ID }}
+      LARK_CLI_CI_APP_SECRET: ${{ secrets.LARK_CLI_CI_APP_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-${{ matrix.goos }}-*
+          path: dist/downloads
+          merge-multiple: true
+
+      - name: Extract built binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch="amd64"
+              ;;
+            arm64|aarch64)
+              arch="arm64"
+              ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          mkdir -p dist/bin
+
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            archive="dist/downloads/lark-cli-${{ matrix.goos }}-${arch}.zip"
+            powershell -Command "Expand-Archive -Path '$archive' -DestinationPath 'dist/bin'"
+            bin_path="$PWD/dist/bin/lark-cli.exe"
+          else
+            archive="dist/downloads/lark-cli-${{ matrix.goos }}-${arch}.tar.gz"
+            tar -xzf "$archive" -C dist/bin
+            bin_path="$PWD/dist/bin/lark-cli"
+          fi
+
+          if [[ ! -f "$archive" ]]; then
+            echo "Expected archive not found: $archive" >&2
+            ls -R dist/downloads >&2
+            exit 1
+          fi
+
+          chmod +x "$bin_path" || true
+          echo "LARK_CLI_E2E_BIN=$bin_path" >> "$GITHUB_ENV"
+
+      - name: Verify built binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="${LARK_CLI_E2E_BIN}"
+          "$bin" version
+
+      - name: Run binary E2E
+        shell: bash
+        run: node scripts/run-binary-e2e.js
