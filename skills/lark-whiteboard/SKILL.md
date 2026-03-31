@@ -1,6 +1,5 @@
 ---
 name: lark-whiteboard
-version: 1.0.0
 description: >
   当用户要求在飞书云文档中绘制图表，或使用飞书画板绘制架构图、流程图、思维导图、时序图或其他可视化图表时使用此 skill。
 compatibility: Requires Node.js 18+

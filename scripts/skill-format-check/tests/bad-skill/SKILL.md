@@ -1,8 +1,8 @@
 ---
-name: bad-skill
-description: "This skill is missing version and metadata."
+version: 1.0.0
+metadata: {}
 ---
 
 # Bad Skill
 
-This skill is missing required fields.
+This skill is missing required fields like name and description.

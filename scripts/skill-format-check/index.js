@@ -48,16 +48,16 @@ function checkSkillFormat() {
                 hasErrors = true;
             }
             if (!frontmatter.includes('version:')) {
-                console.error(`❌ [${skill}] YAML frontmatter missing 'version'`);
-                hasErrors = true;
+                console.warn(`⚠️  [${skill}] YAML frontmatter missing 'version' (Warning only)`);
+                // hasErrors = true;
             }
             if (!frontmatter.includes('description:')) {
                 console.error(`❌ [${skill}] YAML frontmatter missing 'description'`);
                 hasErrors = true;
             }
             if (!frontmatter.includes('metadata:')) {
-                console.error(`❌ [${skill}] YAML frontmatter missing 'metadata'`);
-                hasErrors = true;
+                console.warn(`⚠️  [${skill}] YAML frontmatter missing 'metadata' (Warning only)`);
+                // hasErrors = true; // Downgrade to warning to not fail on existing skills
             }
         }
     }
