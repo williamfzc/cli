@@ -5,9 +5,16 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
+// ============================================================================
+// Constants & Configuration
+// ============================================================================
+
 const API_BASE = "https://api.github.com";
 const SCRIPT_DIR = __dirname;
-const ROOT = path.join(SCRIPT_DIR, "..");
+const ROOT = path.join(SCRIPT_DIR, "..", "..");
+
+const THRESHOLD_L = 300;
+const THRESHOLD_XL = 1200;
 
 const LABEL_DEFINITIONS = {
   "size/S": { color: "77bb00", description: "Low-risk docs, CI, test, or chore only changes" },
@@ -18,6 +25,7 @@ const LABEL_DEFINITIONS = {
 
 const MANAGED_LABELS = new Set(Object.keys(LABEL_DEFINITIONS));
 
+// File path matching configurations
 const DOC_SUFFIXES = [".md", ".mdx", ".txt", ".rst"];
 const LOW_RISK_PREFIXES = [".github/", "docs/", ".changeset/", "testdata/", "tests/", "skill-template/"];
 const LOW_RISK_FILENAMES = new Set(["readme.md", "readme.zh.md", "changelog.md", "license", "cla.md"]);
@@ -26,6 +34,8 @@ const LOW_RISK_TEST_SUFFIXES = ["_test.go", ".snap"];
 const CORE_PREFIXES = ["internal/auth/", "internal/engine/", "internal/config/", "cmd/"];
 const HEAD_BUSINESS_DOMAINS = new Set(["im", "contact", "ccm", "base", "docx"]);
 const LOW_RISK_TYPES = new Set(["docs", "ci", "test", "chore"]);
+
+const SENSITIVE_PATTERN = /(^|\/)(auth|permission|permissions|security)(\/|_|\.|$)/;
 
 const CLASS_STANDARDS = {
   "size/S": {
@@ -67,27 +77,9 @@ const CLASS_STANDARDS = {
   },
 };
 
-function printHelp() {
-  const lines = [
-    "Usage:",
-    "  node scripts/pr-labels/index.js",
-    "  node scripts/pr-labels/index.js --dry-run --pr-url <github-pr-url> [--token <token>] [--json]",
-    "  node scripts/pr-labels/index.js --dry-run --repo <owner/name> --pr-number <number> [--token <token>] [--json]",
-    "",
-    "Modes:",
-    "  default    Read the GitHub Actions event payload and apply labels",
-    "  --dry-run  Fetch the PR, compute the managed label, and print the result without writing labels",
-    "",
-    "Options:",
-    "  --pr-url <url>       GitHub pull request URL, for example https://github.com/larksuite/cli/pull/123",
-    "  --repo <owner/name>  Repository name, used with --pr-number",
-    "  --pr-number <n>      Pull request number, used with --repo",
-    "  --token <token>      GitHub token override; falls back to GITHUB_TOKEN",
-    "  --json               Print dry-run output as JSON instead of the default one-line summary",
-    "  --help               Show this message",
-  ];
-  console.log(lines.join("\n"));
-}
+// ============================================================================
+// Utilities
+// ============================================================================
 
 function log(message) {
   console.error(`sync-pr-labels: ${message}`);
@@ -109,180 +101,124 @@ function envOrFail(name) {
   return value;
 }
 
-function buildHeaders(token, hasBody = false) {
-  const headers = {
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  if (hasBody) {
-    headers["Content-Type"] = "application/json";
-  }
-  return headers;
-}
+// ============================================================================
+// GitHub API Client
+// ============================================================================
 
-function parseArgs(argv) {
-  const options = {
-    dryRun: false,
-    json: false,
-    help: false,
-    prUrl: "",
-    repo: "",
-    prNumber: "",
-    token: "",
-  };
+class GitHubClient {
+  constructor(token, repo, prNumber) {
+    this.token = token;
+    this.repo = repo;
+    this.prNumber = prNumber;
+  }
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--json") {
-      options.json = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else if (arg === "--pr-url") {
-      options.prUrl = argv[i + 1] || "";
-      i += 1;
-    } else if (arg === "--repo") {
-      options.repo = argv[i + 1] || "";
-      i += 1;
-    } else if (arg === "--pr-number") {
-      options.prNumber = argv[i + 1] || "";
-      i += 1;
-    } else if (arg === "--token") {
-      options.token = argv[i + 1] || "";
-      i += 1;
-    } else {
-      throw new Error(`unknown argument: ${arg}`);
+  buildHeaders(hasBody = false) {
+    const headers = {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+    if (this.token) {
+      headers.Authorization = `Bearer ${this.token}`;
+    }
+    if (hasBody) {
+      headers["Content-Type"] = "application/json";
+    }
+    return headers;
+  }
+
+  async request(endpoint, options = {}) {
+    const { method = "GET", payload, allow404 = false } = options;
+    const hasBody = payload !== undefined;
+    const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${endpoint}`;
+    
+    const response = await fetch(url, {
+      method,
+      headers: this.buildHeaders(hasBody),
+      body: hasBody ? JSON.stringify(payload) : undefined,
+    });
+
+    if (allow404 && response.status === 404) {
+      return null;
+    }
+
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`GitHub API ${method} ${url} failed: ${response.status} ${detail}`);
+    }
+
+    const text = await response.text();
+    return text ? JSON.parse(text) : null;
+  }
+
+  async getPullRequest() {
+    return this.request(`/repos/${this.repo}/pulls/${this.prNumber}`);
+  }
+
+  async listPrFiles() {
+    const files = [];
+    for (let page = 1; ; page += 1) {
+      const params = new URLSearchParams({ per_page: "100", page: String(page) });
+      const batch = await this.request(`/repos/${this.repo}/pulls/${this.prNumber}/files?${params}`);
+      if (!batch || batch.length === 0) {
+        break;
+      }
+      files.push(...batch);
+      if (batch.length < 100) {
+        break;
+      }
+    }
+    return files;
+  }
+
+  async listIssueLabels() {
+    const labels = await this.request(`/repos/${this.repo}/issues/${this.prNumber}/labels`);
+    return new Set(labels.map((item) => item.name));
+  }
+
+  async syncLabelDefinition(name) {
+    const label = LABEL_DEFINITIONS[name];
+    const createUrl = `/repos/${this.repo}/labels`;
+    const updateUrl = `/repos/${this.repo}/labels/${encodeURIComponent(name)}`;
+
+    try {
+      await this.request(createUrl, {
+        method: "POST",
+        payload: { name, color: label.color, description: label.description },
+      });
+      log(`created label ${name}`);
+    } catch (error) {
+      if (!String(error.message || error).includes(" 422 ")) {
+        throw error;
+      }
+      await this.request(updateUrl, {
+        method: "PATCH",
+        payload: { new_name: name, color: label.color, description: label.description },
+      });
+      log(`updated label ${name}`);
     }
   }
 
-  return options;
-}
-
-function parsePrUrl(prUrl) {
-  let parsed;
-  try {
-    parsed = new URL(prUrl);
-  } catch {
-    throw new Error(`invalid PR URL: ${prUrl}`);
-  }
-
-  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
-  if (!match) {
-    throw new Error(`unsupported PR URL format: ${prUrl}`);
-  }
-
-  return {
-    repo: `${match[1]}/${match[2]}`,
-    prNumber: Number(match[3]),
-  };
-}
-
-async function githubRequest(url, token, options = {}) {
-  const { method = "GET", payload, allow404 = false } = options;
-  const hasBody = payload !== undefined;
-  const response = await fetch(url, {
-    method,
-    headers: buildHeaders(token, hasBody),
-    body: hasBody ? JSON.stringify(payload) : undefined,
-  });
-
-  if (allow404 && response.status === 404) {
-    return null;
-  }
-
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`GitHub API ${method} ${url} failed: ${response.status} ${detail}`);
-  }
-
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
-}
-
-async function loadEventPayload(filePath) {
-  return JSON.parse(await fs.readFile(filePath, "utf8"));
-}
-
-async function getPullRequest(repo, prNumber, token) {
-  const url = `${API_BASE}/repos/${repo}/pulls/${prNumber}`;
-  return githubRequest(url, token);
-}
-
-async function listPrFiles(repo, prNumber, token) {
-  const files = [];
-  for (let page = 1; ; page += 1) {
-    const params = new URLSearchParams({ per_page: "100", page: String(page) });
-    const url = `${API_BASE}/repos/${repo}/pulls/${prNumber}/files?${params.toString()}`;
-    const batch = await githubRequest(url, token);
-    if (!batch || batch.length === 0) {
-      break;
-    }
-    files.push(...batch);
-    if (batch.length < 100) {
-      break;
-    }
-  }
-  return files;
-}
-
-async function listIssueLabels(repo, prNumber, token) {
-  const url = `${API_BASE}/repos/${repo}/issues/${prNumber}/labels`;
-  const labels = await githubRequest(url, token);
-  return new Set(labels.map((item) => item.name));
-}
-
-async function syncLabelDefinition(repo, token, name) {
-  const label = LABEL_DEFINITIONS[name];
-  const createUrl = `${API_BASE}/repos/${repo}/labels`;
-  const updateUrl = `${API_BASE}/repos/${repo}/labels/${encodeURIComponent(name)}`;
-
-  try {
-    await githubRequest(createUrl, token, {
+  async addLabels(labels) {
+    if (labels.length === 0) return;
+    await this.request(`/repos/${this.repo}/issues/${this.prNumber}/labels`, {
       method: "POST",
-      payload: {
-        name,
-        color: label.color,
-        description: label.description,
-      },
+      payload: { labels },
     });
-    log(`created label ${name}`);
-  } catch (error) {
-    if (!String(error.message || error).includes(" 422 ")) {
-      throw error;
-    }
-    await githubRequest(updateUrl, token, {
-      method: "PATCH",
-      payload: {
-        new_name: name,
-        color: label.color,
-        description: label.description,
-      },
+    log(`added labels: ${labels.join(", ")}`);
+  }
+
+  async removeLabel(name) {
+    await this.request(`/repos/${this.repo}/issues/${this.prNumber}/labels/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      allow404: true,
     });
-    log(`updated label ${name}`);
+    log(`removed label: ${name}`);
   }
 }
 
-async function addLabels(repo, prNumber, token, labels) {
-  if (labels.length === 0) {
-    return;
-  }
-  const url = `${API_BASE}/repos/${repo}/issues/${prNumber}/labels`;
-  await githubRequest(url, token, {
-    method: "POST",
-    payload: { labels },
-  });
-  log(`added labels: ${labels.join(", ")}`);
-}
-
-async function removeLabel(repo, prNumber, token, name) {
-  const url = `${API_BASE}/repos/${repo}/issues/${prNumber}/labels/${encodeURIComponent(name)}`;
-  await githubRequest(url, token, { method: "DELETE", allow404: true });
-  log(`removed label: ${name}`);
-}
+// ============================================================================
+// Path & Domain Heuristics
+// ============================================================================
 
 function parsePrType(title) {
   const match = String(title || "").trim().match(/^([a-z]+)(?:\([^)]+\))?!?:/i);
@@ -293,18 +229,10 @@ function isLowRiskPath(filePath) {
   const normalized = normalizePath(filePath);
   const basename = path.posix.basename(normalized);
 
-  if (DOC_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
-    return true;
-  }
-  if (LOW_RISK_FILENAMES.has(basename)) {
-    return true;
-  }
-  if (LOW_RISK_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
-    return true;
-  }
-  if (LOW_RISK_TEST_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
-    return true;
-  }
+  if (DOC_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return true;
+  if (LOW_RISK_FILENAMES.has(basename)) return true;
+  if (LOW_RISK_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true;
+  if (LOW_RISK_TEST_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return true;
   return normalized.includes("/testdata/");
 }
 
@@ -335,13 +263,9 @@ function getImportantArea(filePath) {
 
 async function detectNewShortcutDomain(files) {
   for (const item of files) {
-    if (item.status !== "added") {
-      continue;
-    }
+    if (item.status !== "added") continue;
     const domain = shortcutDomainForPath(item.filename);
-    if (!domain) {
-      continue;
-    }
+    if (!domain) continue;
     try {
       await fs.access(path.join(ROOT, "shortcuts", domain));
     } catch {
@@ -355,25 +279,20 @@ function collectCoreAreas(filenames) {
   const areas = new Set();
   for (const name of filenames) {
     const normalized = normalizePath(name);
-    if (normalized.startsWith("cmd/")) {
-      areas.add("cmd");
-    } else if (normalized.startsWith("internal/auth/")) {
-      areas.add("internal/auth");
-    } else if (normalized.startsWith("internal/engine/")) {
-      areas.add("internal/engine");
-    } else if (normalized.startsWith("internal/config/")) {
-      areas.add("internal/config");
+    for (const prefix of CORE_PREFIXES) {
+      if (normalized.startsWith(prefix)) {
+        // remove trailing slash for area name
+        areas.add(prefix.slice(0, -1));
+      }
     }
   }
   return areas;
 }
 
 function collectSensitiveKeywords(filenames) {
-  const pattern = /(^|\/)(auth|permission|permissions|security)(\/|_|\.|$)/;
   const hits = new Set();
   for (const name of filenames) {
-    const normalized = normalizePath(name);
-    const match = normalized.match(pattern);
+    const match = normalizePath(name).match(SENSITIVE_PATTERN);
     if (match && match[2]) {
       hits.add(match[2]);
     }
@@ -381,45 +300,17 @@ function collectSensitiveKeywords(filenames) {
   return [...hits].sort();
 }
 
-async function classifyPr(payload, files) {
-  const pr = payload.pull_request;
-  const title = pr.title || "";
-  const prType = parsePrType(title);
-  const filenames = files.map((item) => item.filename || "");
-  // Filter out docs, tests, and other low-risk paths so the size label tracks business impact.
-  const effectiveChanges = files.reduce(
-    (sum, item) => sum + (isLowRiskPath(item.filename) ? 0 : (item.changes || 0)),
-    0,
-  );
-  const totalChanges = files.reduce((sum, item) => sum + (item.changes || 0), 0);
-  const domains = new Set();
-  const importantAreas = new Set();
+// ============================================================================
+// Classification Logic
+// ============================================================================
 
-  for (const name of filenames) {
-    const shortcutDomain = shortcutDomainForPath(name);
-    if (shortcutDomain) {
-      domains.add(shortcutDomain);
-    }
-    const skillDomain = skillDomainForPath(name);
-    if (skillDomain) {
-      domains.add(skillDomain);
-    }
-    
-    const area = getImportantArea(name);
-    if (area) {
-      importantAreas.add(area);
-    }
-  }
-
-  const coreAreas = collectCoreAreas(filenames);
-  const newShortcutDomain = await detectNewShortcutDomain(files);
-  const lowRiskOnly = filenames.length > 0 && filenames.every((name) => isLowRiskPath(name));
-  const singleDomain = domains.size <= 1;
-  const multiDomain = domains.size >= 2;
-  const headDomains = [...domains].filter((domain) => HEAD_BUSINESS_DOMAINS.has(domain));
-  const coreSignals = [...coreAreas].sort();
-  const sensitiveKeywords = collectSensitiveKeywords(filenames);
-  const sensitive = coreSignals.length > 0 || sensitiveKeywords.length > 0;
+function evaluateRules(context) {
+  const {
+    prType, effectiveChanges, lowRiskOnly,
+    domains, headDomains, coreAreas, coreSignals,
+    sensitiveKeywords, sensitive, newShortcutDomain,
+    singleDomain, multiDomain, filenames
+  } = context;
 
   const reasons = [];
   let label;
@@ -427,73 +318,100 @@ async function classifyPr(payload, files) {
   if (lowRiskOnly && (LOW_RISK_TYPES.has(prType) || effectiveChanges === 0)) {
     reasons.push("Only low-risk docs, CI, test, or chore paths were changed, with no effective business code or Skill changes");
     label = "size/S";
-  } else {
-    // XL is reserved for architecture-level or global-impact changes.
-    const architectureLevel =
-      effectiveChanges > 1200
-      || (prType === "refactor" && sensitive && effectiveChanges >= 300)
-      || (coreAreas.size >= 2 && (multiDomain || effectiveChanges >= 300))
-      || (headDomains.length >= 2 && sensitive);
-
-    if (architectureLevel) {
-      if (effectiveChanges > 1200) {
-        reasons.push("Effective business code or Skill changes are far beyond the L threshold");
-      }
-      if (prType === "refactor" && sensitive && effectiveChanges >= 300) {
-        reasons.push("Refactor PR touches core or sensitive paths");
-      }
-      if (coreAreas.size >= 2) {
-        reasons.push("Touches multiple core areas at the same time");
-      }
-      if (headDomains.length >= 2) {
-        reasons.push("Impacts multiple major business domains");
-      }
-      for (const signal of coreSignals) {
-        reasons.push(`Core area hit: ${signal}`);
-      }
-      for (const keyword of sensitiveKeywords) {
-        reasons.push(`Sensitive keyword hit: ${keyword}`);
-      }
-      label = "size/XL";
-    } else if (
-      prType === "refactor"
-      || effectiveChanges >= 300
-      || Boolean(newShortcutDomain)
-      || multiDomain
-      || sensitive
-    ) {
-      if (prType === "refactor") {
-        reasons.push("PR type is refactor");
-      }
-      if (effectiveChanges >= 300) {
-        reasons.push("Effective business code or Skill changes exceed 300 lines");
-      }
-      if (newShortcutDomain) {
-        reasons.push(`Introduces a new business domain directory: shortcuts/${newShortcutDomain}/`);
-      }
-      if (multiDomain) {
-        reasons.push("Touches multiple business domains");
-      }
-      for (const signal of coreSignals) {
-        reasons.push(`Core area hit: ${signal}`);
-      }
-      for (const keyword of sensitiveKeywords) {
-        reasons.push(`Sensitive keyword hit: ${keyword}`);
-      }
-      label = "size/L";
-    } else {
-      if (filenames.some((name) => isBusinessSkillPath(name)) || effectiveChanges > 0) {
-        reasons.push("Regular feat, fix, or Skill change within a single business domain");
-      }
-      if (singleDomain && domains.size > 0) {
-        reasons.push(`Impact is limited to a single business domain: ${[...domains].sort().join(", ")}`);
-      }
-      if (effectiveChanges < 300) {
-        reasons.push("Effective business code or Skill changes are below 300 lines");
-      }
-      label = "size/M";
-    }
+    return { label, reasons };
   }
+
+  // XL is reserved for architecture-level or global-impact changes.
+  const isXL =
+    effectiveChanges > THRESHOLD_XL ||
+    (prType === "refactor" && sensitive && effectiveChanges >= THRESHOLD_L) ||
+    (coreAreas.size >= 2 && (multiDomain || effectiveChanges >= THRESHOLD_L)) ||
+    (headDomains.length >= 2 && sensitive);
+
+  if (isXL) {
+    if (effectiveChanges > THRESHOLD_XL) reasons.push("Effective business code or Skill changes are far beyond the L threshold");
+    if (prType === "refactor" && sensitive && effectiveChanges >= THRESHOLD_L) reasons.push("Refactor PR touches core or sensitive paths");
+    if (coreAreas.size >= 2) reasons.push("Touches multiple core areas at the same time");
+    if (headDomains.length >= 2) reasons.push("Impacts multiple major business domains");
+    coreSignals.forEach((signal) => reasons.push(`Core area hit: ${signal}`));
+    sensitiveKeywords.forEach((keyword) => reasons.push(`Sensitive keyword hit: ${keyword}`));
+    label = "size/XL";
+  } else if (
+    prType === "refactor" ||
+    effectiveChanges >= THRESHOLD_L ||
+    Boolean(newShortcutDomain) ||
+    multiDomain ||
+    sensitive
+  ) {
+    if (prType === "refactor") reasons.push("PR type is refactor");
+    if (effectiveChanges >= THRESHOLD_L) reasons.push(`Effective business code or Skill changes exceed ${THRESHOLD_L} lines`);
+    if (newShortcutDomain) reasons.push(`Introduces a new business domain directory: shortcuts/${newShortcutDomain}/`);
+    if (multiDomain) reasons.push("Touches multiple business domains");
+    coreSignals.forEach((signal) => reasons.push(`Core area hit: ${signal}`));
+    sensitiveKeywords.forEach((keyword) => reasons.push(`Sensitive keyword hit: ${keyword}`));
+    label = "size/L";
+  } else {
+    if (filenames.some(isBusinessSkillPath) || effectiveChanges > 0) {
+      reasons.push("Regular feat, fix, or Skill change within a single business domain");
+    }
+    if (singleDomain && domains.size > 0) {
+      reasons.push(`Impact is limited to a single business domain: ${[...domains].sort().join(", ")}`);
+    }
+    if (effectiveChanges < THRESHOLD_L) {
+      reasons.push(`Effective business code or Skill changes are below ${THRESHOLD_L} lines`);
+    }
+    label = "size/M";
+  }
+
+  return { label, reasons };
+}
+
+async function classifyPr(payload, files) {
+  const pr = payload.pull_request;
+  const title = pr.title || "";
+  const prType = parsePrType(title);
+  const filenames = files.map((item) => item.filename || "");
+  
+  // Filter out docs, tests, and other low-risk paths so the size label tracks business impact.
+  const effectiveChanges = files.reduce(
+    (sum, item) => sum + (isLowRiskPath(item.filename) ? 0 : (item.changes || 0)),
+    0,
+  );
+  const totalChanges = files.reduce((sum, item) => sum + (item.changes || 0), 0);
+  
+  const domains = new Set();
+  const importantAreas = new Set();
+
+  for (const name of filenames) {
+    const shortcutDomain = shortcutDomainForPath(name);
+    if (shortcutDomain) domains.add(shortcutDomain);
+    
+    const skillDomain = skillDomainForPath(name);
+    if (skillDomain) domains.add(skillDomain);
+    
+    const area = getImportantArea(name);
+    if (area) importantAreas.add(area);
+  }
+
+  const coreAreas = collectCoreAreas(filenames);
+  const newShortcutDomain = await detectNewShortcutDomain(files);
+  
+  const lowRiskOnly = filenames.length > 0 && filenames.every(isLowRiskPath);
+  const singleDomain = domains.size <= 1;
+  const multiDomain = domains.size >= 2;
+  const headDomains = [...domains].filter((domain) => HEAD_BUSINESS_DOMAINS.has(domain));
+  const coreSignals = [...coreAreas].sort();
+  const sensitiveKeywords = collectSensitiveKeywords(filenames);
+  const sensitive = coreSignals.length > 0 || sensitiveKeywords.length > 0;
+
+  const context = {
+    prType, effectiveChanges, lowRiskOnly,
+    domains, headDomains, coreAreas, coreSignals,
+    sensitiveKeywords, sensitive, newShortcutDomain,
+    singleDomain, multiDomain, filenames
+  };
+
+  const { label, reasons } = evaluateRules(context);
 
   return {
     label,
@@ -513,11 +431,13 @@ async function classifyPr(payload, files) {
   };
 }
 
+// ============================================================================
+// Output & Formatting
+// ============================================================================
+
 async function writeStepSummary(prNumber, classification) {
   const summaryPath = (process.env.GITHUB_STEP_SUMMARY || "").trim();
-  if (!summaryPath) {
-    return;
-  }
+  if (!summaryPath) return;
 
   const standard = CLASS_STANDARDS[classification.label];
   const domains = classification.domains.join(", ") || "-";
@@ -590,45 +510,117 @@ function printDryRunResult(result, options) {
   const reasonParts = result.reasons.length > 0
     ? result.reasons
     : ["No higher-severity rule matched, so the PR defaults to medium classification"];
+  
   console.log(
     `${result.label} | #${result.prNumber} | type:${result.prType} | eff:${result.effectiveChanges} | `
       + `sig:${signalParts.join(";") || "-"} | reason:${reasonParts.join("; ")}`,
   );
 }
 
+function printHelp() {
+  const lines = [
+    "Usage:",
+    "  node scripts/pr-labels/index.js",
+    "  node scripts/pr-labels/index.js --dry-run --pr-url <github-pr-url> [--token <token>] [--json]",
+    "  node scripts/pr-labels/index.js --dry-run --repo <owner/name> --pr-number <number> [--token <token>] [--json]",
+    "",
+    "Modes:",
+    "  default    Read the GitHub Actions event payload and apply labels",
+    "  --dry-run  Fetch the PR, compute the managed label, and print the result without writing labels",
+    "",
+    "Options:",
+    "  --pr-url <url>       GitHub pull request URL, for example https://github.com/larksuite/cli/pull/123",
+    "  --repo <owner/name>  Repository name, used with --pr-number",
+    "  --pr-number <n>      Pull request number, used with --repo",
+    "  --token <token>      GitHub token override; falls back to GITHUB_TOKEN",
+    "  --json               Print dry-run output as JSON instead of the default one-line summary",
+    "  --help               Show this message",
+  ];
+  console.log(lines.join("\n"));
+}
+
+function parseArgs(argv) {
+  const options = {
+    dryRun: false,
+    json: false,
+    help: false,
+    prUrl: "",
+    repo: "",
+    prNumber: "",
+    token: "",
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--json") options.json = true;
+    else if (arg === "--help" || arg === "-h") options.help = true;
+    else if (arg === "--pr-url") options.prUrl = argv[++i] || "";
+    else if (arg === "--repo") options.repo = argv[++i] || "";
+    else if (arg === "--pr-number") options.prNumber = argv[++i] || "";
+    else if (arg === "--token") options.token = argv[++i] || "";
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+
+  return options;
+}
+
+function parsePrUrl(prUrl) {
+  let parsed;
+  try {
+    parsed = new URL(prUrl);
+  } catch {
+    throw new Error(`invalid PR URL: ${prUrl}`);
+  }
+
+  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+  if (!match) throw new Error(`unsupported PR URL format: ${prUrl}`);
+
+  return { repo: `${match[1]}/${match[2]}`, prNumber: Number(match[3]) };
+}
+
+async function loadEventPayload(filePath) {
+  return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
 async function resolveContext(options) {
+  const token = options.token;
+
   if (options.prUrl) {
     const { repo, prNumber } = parsePrUrl(options.prUrl);
+    const client = new GitHubClient(token, repo, prNumber);
     const payload = {
       repository: { full_name: repo },
-      pull_request: await getPullRequest(repo, prNumber, options.token),
+      pull_request: await client.getPullRequest(),
     };
-    return { repo, prNumber, payload };
+    return { repo, prNumber, payload, client };
   }
 
   if (options.repo || options.prNumber) {
-    if (!options.repo || !options.prNumber) {
-      throw new Error("--repo and --pr-number must be provided together");
-    }
+    if (!options.repo || !options.prNumber) throw new Error("--repo and --pr-number must be provided together");
     const prNumber = Number(options.prNumber);
-    if (!Number.isInteger(prNumber) || prNumber <= 0) {
-      throw new Error(`invalid PR number: ${options.prNumber}`);
-    }
+    if (!Number.isInteger(prNumber) || prNumber <= 0) throw new Error(`invalid PR number: ${options.prNumber}`);
+    
+    const client = new GitHubClient(token, options.repo, prNumber);
     const payload = {
       repository: { full_name: options.repo },
-      pull_request: await getPullRequest(options.repo, prNumber, options.token),
+      pull_request: await client.getPullRequest(),
     };
-    return { repo: options.repo, prNumber, payload };
+    return { repo: options.repo, prNumber, payload, client };
   }
 
   const eventPath = envOrFail("GITHUB_EVENT_PATH");
   const payload = await loadEventPayload(eventPath);
-  return {
-    repo: payload.repository.full_name,
-    prNumber: payload.pull_request.number,
-    payload,
-  };
+  const repo = payload.repository.full_name;
+  const prNumber = payload.pull_request.number;
+  const client = new GitHubClient(token, repo, prNumber);
+
+  return { repo, prNumber, payload, client };
 }
+
+// ============================================================================
+// Main Execution
+// ============================================================================
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -638,13 +630,13 @@ async function main() {
   }
 
   options.token = options.token || envValue("GITHUB_TOKEN");
-  const { repo, prNumber, payload } = await resolveContext(options);
+  const { repo, prNumber, payload, client } = await resolveContext(options);
 
   if (!options.dryRun && !options.token) {
     throw new Error("missing required GitHub token; set GITHUB_TOKEN or pass --token");
   }
 
-  const files = await listPrFiles(repo, prNumber, options.token);
+  const files = await client.listPrFiles();
   const classification = await classifyPr(payload, files);
 
   if (options.dryRun) {
@@ -657,8 +649,7 @@ async function main() {
     desired.add(`area/${area}`);
   }
 
-  const current = await listIssueLabels(repo, prNumber, options.token);
-
+  const current = await client.listIssueLabels();
   const managedCurrent = [...current].filter((label) => MANAGED_LABELS.has(label) || label.startsWith("area/"));
   const toAdd = [...desired].filter((label) => !current.has(label)).sort();
   const toRemove = managedCurrent.filter((label) => !desired.has(label)).sort();
@@ -666,22 +657,19 @@ async function main() {
   for (const area of classification.importantAreas) {
     const labelName = `area/${area}`;
     if (!LABEL_DEFINITIONS[labelName]) {
-      LABEL_DEFINITIONS[labelName] = {
-        color: "1d76db",
-        description: `PR touches the ${area} area`,
-      };
+      LABEL_DEFINITIONS[labelName] = { color: "1d76db", description: `PR touches the ${area} area` };
     }
   }
 
   // Keep label metadata consistent even when labels already exist in the repository.
   for (const label of Object.keys(LABEL_DEFINITIONS)) {
-    await syncLabelDefinition(repo, options.token, label);
+    await client.syncLabelDefinition(label);
   }
 
-  await addLabels(repo, prNumber, options.token, toAdd);
+  await client.addLabels(toAdd);
 
   for (const label of toRemove) {
-    await removeLabel(repo, prNumber, options.token, label);
+    await client.removeLabel(label);
   }
 
   await writeStepSummary(prNumber, classification);
