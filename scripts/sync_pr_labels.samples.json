@@ -1,0 +1,22 @@
+[
+  {
+    "name": "docs-only",
+    "pr_url": "https://github.com/larksuite/cli/pull/27",
+    "expected_label": "size/S"
+  },
+  {
+    "name": "single-domain-im",
+    "pr_url": "https://github.com/larksuite/cli/pull/30",
+    "expected_label": "size/M"
+  },
+  {
+    "name": "core-cmd",
+    "pr_url": "https://github.com/larksuite/cli/pull/20",
+    "expected_label": "size/L"
+  },
+  {
+    "name": "core-cmd-shared",
+    "pr_url": "https://github.com/larksuite/cli/pull/86",
+    "expected_label": "size/L"
+  }
+]

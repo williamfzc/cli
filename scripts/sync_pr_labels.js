@@ -83,7 +83,7 @@ function printHelp() {
     "  --repo <owner/name>  Repository name, used with --pr-number",
     "  --pr-number <n>      Pull request number, used with --repo",
     "  --token <token>      GitHub token override; falls back to GITHUB_TOKEN",
-    "  --json               Print dry-run output as JSON",
+    "  --json               Print dry-run output as JSON instead of the default one-line summary",
     "  --help               Show this message",
   ];
   console.log(lines.join("\n"));
@@ -360,9 +360,17 @@ function collectCoreAreas(filenames) {
   return areas;
 }
 
-function touchesSensitivePath(filenames) {
+function collectSensitiveKeywords(filenames) {
   const pattern = /(^|\/)(auth|permission|permissions|security)(\/|_|\.|$)/;
-  return filenames.some((name) => pattern.test(normalizePath(name)));
+  const hits = new Set();
+  for (const name of filenames) {
+    const normalized = normalizePath(name);
+    const match = normalized.match(pattern);
+    if (match && match[2]) {
+      hits.add(match[2]);
+    }
+  }
+  return [...hits].sort();
 }
 
 async function classifyPr(payload, files) {
@@ -395,8 +403,9 @@ async function classifyPr(payload, files) {
   const singleDomain = domains.size <= 1;
   const multiDomain = domains.size >= 2;
   const headDomains = [...domains].filter((domain) => HEAD_BUSINESS_DOMAINS.has(domain));
-  const touchesCore = filenames.some((name) => CORE_PREFIXES.some((prefix) => normalizePath(name).startsWith(prefix)));
-  const sensitive = touchesCore || touchesSensitivePath(filenames);
+  const coreSignals = [...coreAreas].sort();
+  const sensitiveKeywords = collectSensitiveKeywords(filenames);
+  const sensitive = coreSignals.length > 0 || sensitiveKeywords.length > 0;
 
   const reasons = [];
   let label;
@@ -425,6 +434,12 @@ async function classifyPr(payload, files) {
       if (headDomains.length >= 2) {
         reasons.push("Impacts multiple major business domains");
       }
+      for (const signal of coreSignals) {
+        reasons.push(`Core area hit: ${signal}`);
+      }
+      for (const keyword of sensitiveKeywords) {
+        reasons.push(`Sensitive keyword hit: ${keyword}`);
+      }
       label = "size/XL";
     } else if (
       prType === "refactor"
@@ -445,8 +460,11 @@ async function classifyPr(payload, files) {
       if (multiDomain) {
         reasons.push("Touches multiple business domains");
       }
-      if (sensitive) {
-        reasons.push("Touches core framework paths or security/auth-related sensitive paths");
+      for (const signal of coreSignals) {
+        reasons.push(`Core area hit: ${signal}`);
+      }
+      for (const keyword of sensitiveKeywords) {
+        reasons.push(`Sensitive keyword hit: ${keyword}`);
       }
       label = "size/L";
     } else {
@@ -471,6 +489,8 @@ async function classifyPr(payload, files) {
     effectiveChanges,
     domains: [...domains].sort(),
     coreAreas: [...coreAreas].sort(),
+    coreSignals,
+    sensitiveKeywords,
     newShortcutDomain,
     reasons,
     lowRiskOnly,
@@ -529,37 +549,32 @@ function formatDryRunResult(repo, prNumber, classification) {
     lowRiskOnly: classification.lowRiskOnly,
     domains: classification.domains,
     coreAreas: classification.coreAreas,
+    coreSignals: classification.coreSignals,
+    sensitiveKeywords: classification.sensitiveKeywords,
     reasons: classification.reasons,
     channel: standard.channel,
     gates: standard.gates,
   };
 }
 
-function printDryRunResult(result, asJson) {
-  if (asJson) {
+function printDryRunResult(result, options) {
+  if (options.json) {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  const lines = [
-    `Repo: ${result.repo}`,
-    `PR: #${result.prNumber}`,
-    `Label: ${result.label}`,
-    `PR Type: ${result.prType}`,
-    `Total Changes: ${result.totalChanges}`,
-    `Effective Business/SKILL Changes: ${result.effectiveChanges}`,
-    `Low Risk Only: ${result.lowRiskOnly}`,
-    `Business Domains: ${result.domains.join(", ") || "-"}`,
-    `Core Areas: ${result.coreAreas.join(", ") || "-"}`,
-    `CI/CD Channel: ${result.channel}`,
-    "",
-    "Reasons:",
-    ...(result.reasons.length > 0 ? result.reasons : ["No higher-severity rule matched, so the PR defaults to medium classification"]).map((reason) => `- ${reason}`),
-    "",
-    "Pipeline Gates:",
-    ...result.gates.map((gate) => `- ${gate}`),
+  const signalParts = [
+    ...result.coreSignals.map((signal) => `core:${signal}`),
+    ...result.sensitiveKeywords.map((keyword) => `keyword:${keyword}`),
+    ...(result.domains.length > 0 ? [`domains:${result.domains.join(",")}`] : []),
   ];
-  console.log(lines.join("\n"));
+  const reasonParts = result.reasons.length > 0
+    ? result.reasons
+    : ["No higher-severity rule matched, so the PR defaults to medium classification"];
+  console.log(
+    `${result.label} | #${result.prNumber} | type:${result.prType} | eff:${result.effectiveChanges} | `
+      + `sig:${signalParts.join(";") || "-"} | reason:${reasonParts.join("; ")}`,
+  );
 }
 
 async function resolveContext(options) {
@@ -614,7 +629,7 @@ async function main() {
   const classification = await classifyPr(payload, files);
 
   if (options.dryRun) {
-    printDryRunResult(formatDryRunResult(repo, prNumber, classification), options.json);
+    printDryRunResult(formatDryRunResult(repo, prNumber, classification), options);
     return;
   }
 
