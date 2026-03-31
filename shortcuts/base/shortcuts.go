@@ -78,3 +78,4 @@ func Shortcuts() []common.Shortcut {
 		BaseDashboardBlockDelete,
 	}
 }
+// trigger CI
