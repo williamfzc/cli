@@ -26,6 +26,8 @@ jobs:
           node-version: '20'
 
       - name: Sync managed PR labels
+        # Labeling is best-effort and must not block PR merges.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/sync_pr_labels.js
