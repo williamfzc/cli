@@ -19,3 +19,17 @@ To run the check manually from the root of the repository, execute:
 ```bash
 node scripts/skill-format-check/index.js
 ```
+
+You can also specify a custom target directory as the first argument:
+
+```bash
+node scripts/skill-format-check/index.js ./path/to/my/skills
+```
+
+## Testing
+
+This tool comes with a quick validation script to ensure it correctly identifies good and bad skill formats. To run the tests, execute:
+
+```bash
+./scripts/skill-format-check/test.sh
+```

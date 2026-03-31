@@ -1,10 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SKILLS_DIR = path.join(__dirname, '../../skills');
+// Allow passing a target directory as the first argument, default to '../../skills'
+const targetDirArg = process.argv[2] || '../../skills';
+const SKILLS_DIR = path.resolve(__dirname, targetDirArg);
 
 function checkSkillFormat() {
-  console.log('Checking skill format...');
+  console.log(`Checking skill format in ${SKILLS_DIR}...`);
 
   if (!fs.existsSync(SKILLS_DIR)) {
     console.error('Skills directory not found:', SKILLS_DIR);
