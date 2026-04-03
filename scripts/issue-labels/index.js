@@ -39,6 +39,8 @@ const DOMAIN_SERVICES = [
   "auth",
   "core",
 ];
+const DOMAIN_ALIASES = ["docs"];
+const DOMAIN_REGEX_ALTERNATION = [...DOMAIN_SERVICES, ...DOMAIN_ALIASES].join("|");
 const DOMAIN_LABELS = DOMAIN_SERVICES.map((s) => `domain/${s}`);
 const DOMAIN_LABEL_SET = new Set(DOMAIN_LABELS);
 const MANAGED_LABELS = [...TYPE_LABELS, ...DOMAIN_LABELS];
@@ -146,14 +148,14 @@ function collectDomainsFromText(title, body) {
   }
 
   // 1) Explicit domain labels in text: domain/<service>
-  const explicit = /\bdomain\/(im|doc|docs|drive|base|sheets|calendar|mail|task|vc|whiteboard|minutes|wiki|event|auth|core)\b/gi;
+  const explicit = new RegExp(`\\bdomain\\/(${DOMAIN_REGEX_ALTERNATION})\\b`, "gi");
   for (const match of text.matchAll(explicit)) {
     const svc = match && match[1] ? normalizeService(match[1]) : "";
     if (DOMAIN_SERVICES.includes(svc)) hits.add(svc);
   }
 
   // 2) Command mention: lark-cli <service> / lark cli <service>
-  const cmd = /\blark[-\s]?cli\s+(im|doc|docs|drive|base|sheets|calendar|mail|task|vc|whiteboard|minutes|wiki|event|auth|core)\b/gi;
+  const cmd = new RegExp(`\\blark[-\\s]?cli\\s+(${DOMAIN_REGEX_ALTERNATION})\\b`, "gi");
   for (const match of text.matchAll(cmd)) {
     const svc = match && match[1] ? normalizeService(match[1]) : "";
     if (DOMAIN_SERVICES.includes(svc)) hits.add(svc);
@@ -599,6 +601,15 @@ function parseArgs(argv) {
     state: "open",
   };
 
+  function readFlagValue(flag) {
+    const value = argv[i + 1];
+    if (value === undefined || String(value).startsWith("-")) {
+      throw new Error(`missing value for ${flag}`);
+    }
+    i += 1;
+    return String(value);
+  }
+
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
@@ -614,19 +625,19 @@ function parseArgs(argv) {
       continue;
     }
     if (a === "--token") {
-      args.token = String(argv[++i] || "");
+      args.token = readFlagValue("--token");
       continue;
     }
     if (a === "--repo") {
-      args.repo = String(argv[++i] || "");
+      args.repo = readFlagValue("--repo");
       continue;
     }
     if (a === "--max-pages") {
-      args.maxPages = toInt(argv[++i], args.maxPages);
+      args.maxPages = toInt(readFlagValue("--max-pages"), args.maxPages);
       continue;
     }
     if (a === "--max-issues") {
-      args.maxIssues = toInt(argv[++i], args.maxIssues);
+      args.maxIssues = toInt(readFlagValue("--max-issues"), args.maxIssues);
       continue;
     }
     if (a === "--process-all") {
@@ -646,7 +657,7 @@ function parseArgs(argv) {
       continue;
     }
     if (a === "--state") {
-      args.state = String(argv[++i] || "open");
+      args.state = readFlagValue("--state");
       continue;
     }
     throw new Error(`unknown argument: ${a}`);
