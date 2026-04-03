@@ -1,5 +1,10 @@
 name: Issue Labels
 
+env:
+  # Opt into Node.js 24 runtime for JavaScript actions.
+  # See: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   schedule:
     - cron: '0 * * * *' # every hour
@@ -27,7 +32,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Sync managed issue labels
         id: sync_issue_labels
