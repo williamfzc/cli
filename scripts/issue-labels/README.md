@@ -37,7 +37,7 @@ The workflow supports both:
 - `schedule` (hourly)
 - `workflow_dispatch` (manual run)
 
-Scheduled runs write labels by default (hourly with `--lookback-hours 6`). Manual runs default to dry-run unless `dry_run=false` is selected.
+Scheduled runs write labels by default (hourly with `--lookback-hours 6`). Manual runs default to dry-run unless `dry_run=false` is selected. For manual runs, you can override the lookback window via the `lookback_hours` input.
 
 ### Local dry-run
 

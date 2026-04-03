@@ -15,6 +15,11 @@ on:
         required: false
         default: true
         type: boolean
+      lookback_hours:
+        description: "Only scan issues updated in the last N hours"
+        required: false
+        default: "6"
+        type: string
 
 permissions:
   contents: read
@@ -41,8 +46,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          lookback="6"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.lookback_hours }}" ]; then
+            lookback="${{ github.event.inputs.lookback_hours }}"
+          fi
+
           args=(
-            "--lookback-hours" "6"
+            "--lookback-hours" "$lookback"
             "--max-issues" "300"
           )
 
