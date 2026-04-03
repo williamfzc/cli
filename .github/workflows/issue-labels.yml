@@ -37,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           args=(
-            "--lookback-hours" "24"
+            "--lookback-hours" "6"
             "--max-issues" "300"
           )
 
