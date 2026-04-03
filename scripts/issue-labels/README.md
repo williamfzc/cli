@@ -32,7 +32,12 @@ Related GitHub Actions workflow: `.github/workflows/issue-labels.yml`.
 
 ### GitHub Actions (recommended)
 
-The workflow supports `workflow_dispatch` (manual run). A `schedule` entry is prepared but commented out by default.
+The workflow supports both:
+
+- `schedule` (hourly)
+- `workflow_dispatch` (manual run)
+
+Scheduled runs write labels by default. Manual runs default to dry-run unless `dry_run=false` is selected.
 
 ### Local dry-run
 

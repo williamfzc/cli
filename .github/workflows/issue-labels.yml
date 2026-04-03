@@ -1,30 +1,14 @@
 name: Issue Labels
 
 on:
-  # NOTE: Scheduled execution is prepared but intentionally disabled for now.
-  # schedule:
-  #   - cron: '0 * * * *' # every hour
+  schedule:
+    - cron: '0 * * * *' # every hour
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Do not write labels, only print planned changes"
         required: false
         default: true
-        type: boolean
-      lookback_hours:
-        description: "Only scan issues updated in the last N hours"
-        required: false
-        default: "24"
-        type: string
-      max_issues:
-        description: "Hard limit on issues processed in one run"
-        required: false
-        default: "300"
-        type: string
-      sync_domains:
-        description: "Sync domain/* labels strictly (add missing and remove stale)"
-        required: false
-        default: false
         type: boolean
 
 permissions:
@@ -53,11 +37,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           args=(
-            "--lookback-hours" "${{ github.event.inputs.lookback_hours || '24' }}"
-            "--max-issues" "${{ github.event.inputs.max_issues || '300' }}"
+            "--lookback-hours" "24"
+            "--max-issues" "300"
           )
-          if [ "${{ github.event.inputs.dry_run || 'true' }}" = "true" ]; then args+=("--dry-run" "--json"); fi
-          if [ "${{ github.event.inputs.sync_domains || 'false' }}" = "true" ]; then args+=("--sync-domains"); fi
+
+          # Schedule runs should write labels by default.
+          # Manual runs default to dry-run unless explicitly disabled.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run || 'true' }}" = "true" ]; then
+            args+=("--dry-run" "--json")
+          fi
+
           node scripts/issue-labels/index.js "${args[@]}"
 
       - name: Warn when label sync fails
