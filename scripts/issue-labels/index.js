@@ -422,6 +422,9 @@ class GitHubClient {
   /**
    * Search for currently unlabeled issues in the repository.
    *
+   * This is intentionally a one-shot triage pass: once any label is added, the
+   * issue falls out of scope for future scheduled runs.
+   *
    * @param {{state?: string, maxPages?: number, maxIssues?: number}} params
    * @returns {Promise<any[]>}
    */
@@ -718,7 +721,7 @@ async function main() {
   const results = {
     repo,
     dryRun: args.dryRun,
-    query: "unlabeled issues",
+    query: "unlabeled issues (intentional one-shot scope)",
     scanned: 0,
     skippedPR: 0,
     skippedIssue: 0,

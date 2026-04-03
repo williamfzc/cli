@@ -1,6 +1,6 @@
 # Issue Labels
 
-This script searches unlabeled GitHub issues in a repository and applies labels based on heuristics.
+This script searches unlabeled GitHub issues in a repository and applies labels based on heuristics. It is intentionally a one-shot triage pass: once any label is added to an issue, that issue is out of scope for future scheduled runs.
 
 It only covers two label dimensions:
 
@@ -41,6 +41,8 @@ The workflow supports both:
 
 Scheduled runs write labels by default. Manual runs default to dry-run unless `dry_run=false` is selected.
 
+Only issues with no labels are scanned. This is intentional: the automation is meant to triage brand-new unlabeled issues once, not to continuously reconcile labels on previously triaged issues.
+
 ### Local dry-run
 
 Provide a token to avoid anonymous rate limits:
@@ -57,7 +59,7 @@ GITHUB_TOKEN=$(gh auth token) \
 
 - `--dry-run`: Do not write labels, only print planned changes
 - `--json`: JSON output (usually with `--dry-run`)
-- `--max-issues <n>` / `--max-pages <n>`: Bound unlabeled-issue search size
+- `--max-issues <n>` / `--max-pages <n>`: Bound unlabeled-issue search size for each run
 - `--sync-domains`: Stricter `domain/*` sync when at least one managed domain matches (may still leave stale labels if nothing matches)
 - `--override-type`: Allow overriding existing type labels (use with caution)
 
