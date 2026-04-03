@@ -45,8 +45,8 @@ const TYPE_TIE_BREAKER = [
   "security",
   "bug",
   "performance",
-  "documentation",
   "enhancement",
+  "documentation",
   "question",
 ];
 
@@ -84,12 +84,63 @@ function normalizeText(title, body) {
 
 function collectDomainsFromText(title, body) {
   const text = normalizeText(title, body);
-  const pattern = /\blark-cli\s+(im|doc|base|sheets|calendar|mail|task|vc|whiteboard|minutes|wiki|event|auth|core)\b/gi;
+  const titleText = String(title || "").toLowerCase();
+
   const hits = new Set();
-  for (const match of text.matchAll(pattern)) {
-    const svc = match && match[1] ? String(match[1]).toLowerCase() : "";
+
+  function normalizeService(svc) {
+    const s = String(svc || "").toLowerCase();
+    if (s === "docs") return "doc";
+    return s;
+  }
+
+  // 1) Explicit domain labels in text: domain/<service>
+  const explicit = /\bdomain\/(im|doc|docs|base|sheets|calendar|mail|task|vc|whiteboard|minutes|wiki|event|auth|core)\b/gi;
+  for (const match of text.matchAll(explicit)) {
+    const svc = match && match[1] ? normalizeService(match[1]) : "";
     if (DOMAIN_SERVICES.includes(svc)) hits.add(svc);
   }
+
+  // 2) Command mention: lark-cli <service> / lark cli <service>
+  const cmd = /\blark[-\s]?cli\s+(im|doc|docs|base|sheets|calendar|mail|task|vc|whiteboard|minutes|wiki|event|auth|core)\b/gi;
+  for (const match of text.matchAll(cmd)) {
+    const svc = match && match[1] ? normalizeService(match[1]) : "";
+    if (DOMAIN_SERVICES.includes(svc)) hits.add(svc);
+  }
+
+  // 3) Loose title match: if title contains a standalone service word.
+  // This is intentionally limited to TITLE to reduce false positives.
+  // NOTE: exclude `im` here because it's too common in English text (e.g. "im stuck").
+  const looseServices = DOMAIN_SERVICES.filter((s) => s !== "im");
+  for (const svc of looseServices) {
+    const re = new RegExp(`\\b${svc}\\b`, "i");
+    if (re.test(titleText)) hits.add(svc);
+  }
+
+  // 4) Keyword heuristics (for users who don't paste the exact command)
+  // Keep this conservative; add keywords only when they are strongly tied to a domain.
+  const keywordMap = {
+    base: [/\bbitable\b/i, /多维表格/],
+    doc: [/\bdocx\b/i, /文档/],
+    sheets: [/电子表格/],
+    calendar: [/日历/],
+    mail: [/邮件/],
+    task: [/任务/],
+    wiki: [/知识库/],
+    minutes: [/妙记/],
+    vc: [/会议/],
+    im: [/消息|群聊|私聊/],
+  };
+  for (const [svc, patterns] of Object.entries(keywordMap)) {
+    if (!DOMAIN_SERVICES.includes(svc)) continue;
+    for (const re of patterns) {
+      if (re.test(text)) {
+        hits.add(svc);
+        break;
+      }
+    }
+  }
+
   return [...hits].sort();
 }
 
@@ -112,8 +163,8 @@ function scoreTypeFromText(title, body) {
       /\bhow to\b|\busage\b|\bis it possible\b|\bdoes it support\b|\bquestion\b/i,
     ],
     documentation: [
-      /\bdocumentation\b|\bdocs\b|\breadme\b|\btypo\b|\bexample\b/i,
-      /文档|示例|说明|拼写/, 
+      /\bdocumentation\b|\breadme\b|\btypo\b|\bexample\b/i,
+      /示例|拼写/, 
     ],
     performance: [
       /慢|卡住|超时|高内存|响应慢|耗时/, 
@@ -306,6 +357,7 @@ function planIssueLabelChanges(params) {
     desiredType,
     desiredDomainLabels,
     syncDomains,
+    overrideType,
   } = params;
 
   const current = currentLabels instanceof Set ? currentLabels : new Set(currentLabels || []);
@@ -313,13 +365,17 @@ function planIssueLabelChanges(params) {
   const toRemove = new Set();
 
   // Type: only apply when desiredType exists.
+  // Safety: by default, do NOT override existing type labels to avoid reverting manual triage.
   if (desiredType) {
     const currentType = [...current].filter((l) => TYPE_LABEL_SET.has(l));
-    if (!current.has(desiredType)) {
-      toAdd.add(desiredType);
-    }
-    for (const t of currentType) {
-      if (t !== desiredType) toRemove.add(t);
+    const shouldApplyType = overrideType || currentType.length === 0;
+    if (shouldApplyType) {
+      if (!current.has(desiredType)) {
+        toAdd.add(desiredType);
+      }
+      for (const t of currentType) {
+        if (t !== desiredType) toRemove.add(t);
+      }
     }
   }
 
@@ -356,6 +412,7 @@ function parseArgs(argv) {
     maxIssues: 300,
     onlyMissing: true,
     syncDomains: false,
+    overrideType: false,
     state: "open",
   };
 
@@ -409,6 +466,10 @@ function parseArgs(argv) {
       args.syncDomains = true;
       continue;
     }
+    if (a === "--override-type") {
+      args.overrideType = true;
+      continue;
+    }
     if (a === "--state") {
       args.state = String(argv[++i] || "open");
       continue;
@@ -434,6 +495,7 @@ Options:
   --only-missing       Only write when changes are needed (default)
   --process-all        Evaluate all scanned issues
   --sync-domains       Strictly sync domain/* (remove stale) when domain matched
+  --override-type      Override existing type labels (default: false)
   --state open|all     Issue state to scan (default: open)
 `;
   console.log(msg);
@@ -492,6 +554,7 @@ async function main() {
       desiredType,
       desiredDomainLabels,
       syncDomains: args.syncDomains,
+      overrideType: args.overrideType,
     });
 
     const hasChange = toAdd.length > 0 || toRemove.length > 0;
