@@ -601,6 +601,8 @@ function parseArgs(argv) {
     state: "open",
   };
 
+  let i = 0;
+
   function readFlagValue(flag) {
     const value = argv[i + 1];
     if (value === undefined || String(value).startsWith("-")) {
@@ -610,7 +612,7 @@ function parseArgs(argv) {
     return String(value);
   }
 
-  for (let i = 0; i < argv.length; i += 1) {
+  for (; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
       args.help = true;
